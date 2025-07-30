@@ -14,6 +14,7 @@ add_library(${PROJECT_NAME} SHARED
 
 target_link_libraries(${PROJECT_NAME}
     serialport
+    pthread
 )
 
 add_executable(rpp_keyboard_teleoperate
