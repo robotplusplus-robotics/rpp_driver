@@ -10,11 +10,12 @@
 #include "command.h"
 #include "data_type.h"
 
-#include <libserialport.h>
+#include <boost/asio.hpp>
+#include <boost/asio/serial_port.hpp>
 
 using namespace std;
 
-#define DATA_LEN_MAX 256 // 最大数据长度
+#define DATA_LEN_MAX 1024 * 4 // 最大数据长度
 
 #define MotionModel_2WD "2wd"
 #define MotionModel_4WD "4wd"
@@ -97,7 +98,8 @@ class RPPDriver
 
   private:
     // serial
-    struct sp_port *port_;
+    boost::asio::io_context io_context_;
+    boost::asio::serial_port *serial_port_ = nullptr;
     string port_name_;
     int baud_rate_;
     int control_rate_;

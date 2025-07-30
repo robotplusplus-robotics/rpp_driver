@@ -11,7 +11,7 @@ RPPDriver::RPPDriver(string port_name, int32_t baud_rate, int32_t control_rate, 
                      double wheel_radius, double wheel_bias, double wheel_base, bool use_diff_twist)
     : port_name_(port_name), baud_rate_(baud_rate), control_rate_(control_rate), motion_model_(motion_model),
       wheel_radius_(wheel_radius), wheel_bias_(wheel_bias), wheel_base_(wheel_base), use_diff_twist_(use_diff_twist),
-      loop_running_(false), port_(NULL)
+      loop_running_(false), serial_port_(nullptr)
 {
     ring_buffer_.initSerialRingBuffer(DATA_LEN_MAX);
 }
@@ -21,45 +21,39 @@ RPPDriver::~RPPDriver()
     loop_running_ = false;
     recv_thread_.join();
     send_thread_.join();
-    if (port_ != NULL)
+    if (serial_port_)
     {
-        sp_close(port_);
-        sp_free_port(port_);
-        port_ = NULL;
+        try
+        {
+            serial_port_->close();
+        }
+        catch (...)
+        {
+        }
+        delete serial_port_;
+        serial_port_ = nullptr;
     }
 }
 
 void RPPDriver::start()
 {
-
-    // check serial and init serial
-    while (true)
+    try
     {
-        sp_signal signals;
-        if (port_ == NULL || sp_get_signals(port_, &signals) != SP_OK)
-        {
-            if (sp_get_port_by_name(port_name_.c_str(), &port_) != SP_OK)
-            {
-                fprintf(stderr, "error port name\n");
-                continue;
-            }
-            if (sp_open(port_, SP_MODE_READ_WRITE) != SP_OK)
-            {
-                sp_free_port(port_);
-                fprintf(stderr, "open port failed\n");
-                continue;
-            }
-            sp_set_baudrate(port_, baud_rate_);
-            sp_set_bits(port_, 8);
-            sp_set_parity(port_, SP_PARITY_NONE);
-            sp_set_stopbits(port_, 1);
-            break;
-        }
-    }
+        serial_port_ = new boost::asio::serial_port(io_context_, port_name_);
+        serial_port_->set_option(boost::asio::serial_port::baud_rate(baud_rate_));
+        serial_port_->set_option(boost::asio::serial_port::flow_control(boost::asio::serial_port::flow_control::none));
+        serial_port_->set_option(boost::asio::serial_port::parity(boost::asio::serial_port::parity::none));
+        serial_port_->set_option(boost::asio::serial_port::stop_bits(boost::asio::serial_port::stop_bits::one));
+        serial_port_->set_option(boost::asio::serial_port::character_size(8));
 
-    loop_running_ = true;
-    recv_thread_ = thread(&RPPDriver::recv_spin, this);
-    send_thread_ = thread(&RPPDriver::send_spin, this);
+        loop_running_ = true;
+        recv_thread_ = thread(&RPPDriver::recv_spin, this);
+        send_thread_ = thread(&RPPDriver::send_spin, this);
+    }
+    catch (const std::exception &e)
+    {
+        fprintf(stderr, "Serial init failed: %s\n", e.what());
+    }
 }
 
 void RPPDriver::stop()
@@ -70,7 +64,7 @@ void RPPDriver::stop()
 
 bool RPPDriver::stoped()
 {
-    return loop_running_ == false && port_ == NULL;
+    return loop_running_ == false && serial_port_ == nullptr;
 }
 
 void RPPDriver::send_spin()
@@ -92,15 +86,18 @@ void RPPDriver::send_spin()
                 vector<uint8_t> msg;
                 msg = send_queue_.front();
                 send_queue_.pop();
-                const uint8_t *buffer = msg.data();
-                size_t size = msg.size();
-                // not check serial
-                int bytes_written = sp_nonblocking_write(port_, buffer, size); // nonblocking
-                if (bytes_written != size)
+                try
                 {
-                    fprintf(stderr, "send error Func code : %02x\n", buffer[3]);
-                    // maybe can send msg again
-                    // send_queue_.push(msg);
+                    size_t bytes_written =
+                        boost::asio::write(*serial_port_, boost::asio::buffer(msg.data(), msg.size()));
+                    if (bytes_written != msg.size())
+                    {
+                        fprintf(stderr, "Partial write: %zu/%zu\n", bytes_written, msg.size());
+                    }
+                }
+                catch (const std::exception &e)
+                {
+                    fprintf(stderr, "Write failed: %s\n", e.what());
                 }
             }
         }
@@ -112,47 +109,36 @@ void RPPDriver::recv_spin()
 {
     while (loop_running_)
     {
-        sp_signal signals;
-        // check serial and init serial
-        if (port_ == NULL || sp_get_signals(port_, &signals) != SP_OK)
+        try
         {
-            if (sp_get_port_by_name(port_name_.c_str(), &port_) != SP_OK)
+            uint8_t buffer[1];
+            size_t len =
+                boost::asio::read(*serial_port_, boost::asio::buffer(buffer), boost::asio::transfer_at_least(1));
+            if (len > 0)
             {
-                fprintf(stderr, "error port name\n");
-                continue;
+                for (size_t i = 0; i < len; ++i)
+                {
+                    // printf("%02x ", buffer[i]);
+                    ring_buffer_.writeSerialRingBuffer(buffer[i]);
+                }
+                dataStream();
             }
-            if (sp_open(port_, SP_MODE_READ_WRITE) != SP_OK)
+        }
+        catch (const boost::system::system_error &e)
+        {
+            // 处理超时或错误
+            if (e.code() != boost::asio::error::operation_aborted)
             {
-                sp_free_port(port_);
-                fprintf(stderr, "open port failed\n");
-                continue;
+                fprintf(stderr, "Serial read error: %s\n", e.what());
+                // 等待后重试
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
-            sp_set_baudrate(port_, baud_rate_);
-            sp_set_bits(port_, 8);
-            sp_set_parity(port_, SP_PARITY_NONE);
-            sp_set_stopbits(port_, 1);
-            continue;
         }
-        int8_t buffer[1];
-        int bytes_read = sp_blocking_read(port_, buffer, sizeof(buffer), 1); // 1ms timeout
-
-        if (bytes_read < 0)
+        catch (...)
         {
-            fprintf(stderr, "read data error\n");
-            sp_close(port_);
-            sp_free_port(port_);
-            port_ = NULL;
-            continue;
+            // 其他异常
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
-        else if (bytes_read == 0)
-        {
-            continue;
-        }
-        for (int i = 0; i < bytes_read; i++)
-        {
-            ring_buffer_.writeSerialRingBuffer(buffer[0]);
-        }
-        dataStream();
     }
 }
 
