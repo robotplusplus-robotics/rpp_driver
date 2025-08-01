@@ -29,7 +29,7 @@ namespace rpp
 class RPPDriver
 {
   public:
-    RPPDriver(string port_name, int32_t baud_rate, int32_t control_rate, string motion_model, double wheel_radius,
+    RPPDriver(string port, int32_t baud_rate, int32_t control_rate, string motion_model, double wheel_radius,
               double wheel_bias, double wheel_base, bool use_diff_twist);
 
     ~RPPDriver();
@@ -100,7 +100,7 @@ class RPPDriver
     // serial
     boost::asio::io_context io_context_;
     boost::asio::serial_port *serial_port_ = nullptr;
-    string port_name_;
+    string port_;
     int baud_rate_;
     int control_rate_;
 

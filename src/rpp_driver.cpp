@@ -7,9 +7,9 @@ using namespace std;
 namespace rpp
 {
 
-RPPDriver::RPPDriver(string port_name, int32_t baud_rate, int32_t control_rate, string motion_model,
+RPPDriver::RPPDriver(string port, int32_t baud_rate, int32_t control_rate, string motion_model,
                      double wheel_radius, double wheel_bias, double wheel_base, bool use_diff_twist)
-    : port_name_(port_name), baud_rate_(baud_rate), control_rate_(control_rate), motion_model_(motion_model),
+    : port_(port), baud_rate_(baud_rate), control_rate_(control_rate), motion_model_(motion_model),
       wheel_radius_(wheel_radius), wheel_bias_(wheel_bias), wheel_base_(wheel_base), use_diff_twist_(use_diff_twist),
       loop_running_(false), serial_port_(nullptr)
 {
@@ -39,7 +39,7 @@ void RPPDriver::start()
 {
     try
     {
-        serial_port_ = new boost::asio::serial_port(io_context_, port_name_);
+        serial_port_ = new boost::asio::serial_port(io_context_, port_);
         serial_port_->set_option(boost::asio::serial_port::baud_rate(baud_rate_));
         serial_port_->set_option(boost::asio::serial_port::flow_control(boost::asio::serial_port::flow_control::none));
         serial_port_->set_option(boost::asio::serial_port::parity(boost::asio::serial_port::parity::none));

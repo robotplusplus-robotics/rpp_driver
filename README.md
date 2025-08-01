@@ -54,8 +54,8 @@ find_package(Boost REQUIRED COMPONENTS system)
     **注意**：该类会自动创建一个串口通信线程，用户不需要手动创建线程。
 
 2. 参数说明：
-    - port_name: 串口设备名，例如：/dev/ttyUSB0
-    - baudrate: 波特率，本公司底盘默认出场波特率为230400
+    - port: 串口设备名，例如：/dev/ttyUSB0
+    - baud_rate: 波特率，本公司底盘默认出场波特率为230400
     - control_rate: 默认通信控制频率，单位：Hz
     - motion_model: 底盘类型，"2wd"：两轮差速；"4wd"：四轮差速；"4w4s"：四轮四转；"mecanum"：麦克纳姆轮；"ackermann"：阿克曼转向
     - wheel_radius: 车轮半径，单位：米
