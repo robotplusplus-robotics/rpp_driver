@@ -475,7 +475,7 @@ void RPPDriver::updateOdometry(void)
         dist_rb = wheel_radius_ * rb_diff_theta;
         dx = (dist_lf + dist_lb + dist_rf + dist_rb) * 0.25;
         dy = (-dist_lf + dist_lb + dist_rf - dist_rb) * 0.25;
-        domega = (-dist_lf - dist_lb + dist_rf + dist_rb) * 0.25 / (wheel_base_ + wheel_bias_);
+        domega = (-dist_lf - dist_lb + dist_rf + dist_rb) * 0.5 / (wheel_base_ + wheel_bias_);
     }
     else if (motion_model_ == "4w4s")
     {
@@ -554,7 +554,7 @@ void RPPDriver::updateOdometry(void)
         {
             twist_.x = (vel_lf + vel_lb + vel_rf + vel_rb) * 0.25;
             twist_.y = (-vel_lf + vel_lb + vel_rf - vel_rb) * 0.25;
-            twist_.theta = (-vel_lf + vel_lb + vel_rf - vel_rb) * 0.25 / (wheel_base_ + wheel_bias_);
+            twist_.theta = (-vel_lf + vel_lb + vel_rf - vel_rb) * 0.5 / (wheel_base_ + wheel_bias_);
         }
         else if (motion_model_ == "4w4s")
         {
