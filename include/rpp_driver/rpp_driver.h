@@ -64,6 +64,8 @@ class RPPDriver
 
     void updateOdometry(void);
 
+    void updateTwist(void);
+
     DeviceState getDeviceState();
 
     BatteryState getBatteryState();

@@ -318,6 +318,9 @@ void RPPDriver::handleMotorOmegaStatus(const char *data, const int len)
             memcpy(&cur_turn_motor_state_.motor_states[i].omega, (const void *)&data[4 * i + 6 + 16], sizeof(float));
         }
     }
+    if(use_diff_twist_)
+        return;
+    updateTwist();
 }
 
 void RPPDriver::handleBatteryStatusData(const char *data, const int len)
@@ -409,13 +412,11 @@ void RPPDriver::handleThrottleSteeringStatusData(const char *data, const int len
 
 void RPPDriver::updateOdometry(void)
 {
-    // cur_motor_state_
     static bool init = false;
     static chrono::time_point<chrono::system_clock> last_time;
 
     if (!init)
     {
-        /// TODO: wait for motor state from mobile base.
         last_motor_state_ = cur_motor_state_;
         if (motion_model_ == "4w4s")
             last_turn_motor_state_ = cur_turn_motor_state_;
@@ -424,7 +425,7 @@ void RPPDriver::updateOdometry(void)
         last_time = chrono::system_clock::now();
     }
     auto now = chrono::system_clock::now();
-    auto dt = chrono::duration_cast<chrono::nanoseconds>(now - last_time).count() / 1000000000.0;
+    auto dt = chrono::duration<double>(now - last_time).count();
 
     if (dt < 0.00001)
     {
@@ -520,76 +521,80 @@ void RPPDriver::updateOdometry(void)
     odometry_.x += (dx * cos(odometry_.theta) - dy * sin(odometry_.theta));
     odometry_.y += (dx * sin(odometry_.theta) + dy * cos(odometry_.theta));
     odometry_.theta += domega;
+    odometry_.ts = chrono::duration_cast<chrono::nanoseconds>(chrono::system_clock::now().time_since_epoch()).count();
+    last_motor_state_ = cur_motor_state_;
+    if (motion_model_ == "4w4s")
+        last_turn_motor_state_ = cur_turn_motor_state_;
 
     if (use_diff_twist_)
     {
         twist_.x = dx / dt;
         twist_.y = dy / dt;
         twist_.theta = domega / dt;
+        twist_.ts = odometry_.ts;
     }
-    else
-    {
-        double vel_lf, vel_lb, vel_rf, vel_rb;
-        vel_lf = cur_motor_state_.motor_states[LF_MOTOR_ID].omega * wheel_radius_;
-        vel_lb = cur_motor_state_.motor_states[LB_MOTOR_ID].omega * wheel_radius_;
-        vel_rf = cur_motor_state_.motor_states[RF_MOTOR_ID].omega * wheel_radius_;
-        vel_rb = cur_motor_state_.motor_states[RB_MOTOR_ID].omega * wheel_radius_;
+}
 
-        if (motion_model_ == "2wd")
-        {
-            twist_.x = (vel_lf + vel_rf) * 0.5;
-            twist_.theta = (vel_rf - vel_lf) / wheel_bias_;
-        }
-        else if (motion_model_ == "4wd")
-        {
-            twist_.x = (vel_lf + vel_lb + vel_rf + vel_rb) * 0.25;
-            twist_.theta = ((vel_rf + vel_rb) - (vel_lf + vel_lb)) * 0.5 / wheel_bias_;
-        }
-        else if (motion_model_ == "ackermann")
-        {
-            twist_.x = (vel_lb + vel_rb) * 0.5;
-            twist_.theta = (vel_rb - vel_lb) / wheel_bias_;
-        }
-        else if (motion_model_ == "mecanum")
-        {
-            twist_.x = (vel_lf + vel_lb + vel_rf + vel_rb) * 0.25;
-            twist_.y = (-vel_lf + vel_lb + vel_rf - vel_rb) * 0.25;
-            twist_.theta = (-vel_lf + vel_lb + vel_rf - vel_rb) * 0.5 / (wheel_base_ + wheel_bias_);
-        }
-        else if (motion_model_ == "4w4s")
-        {
-            float lf_turn_angle = cur_turn_motor_state_.motor_states[LF_MOTOR_ID].theta;
-            float lb_turn_angle = cur_turn_motor_state_.motor_states[LB_MOTOR_ID].theta;
-            float rf_turn_angle = cur_turn_motor_state_.motor_states[RF_MOTOR_ID].theta;
-            float rb_turn_angle = cur_turn_motor_state_.motor_states[RB_MOTOR_ID].theta;
-            float c_lf = cos(lf_turn_angle);
-            float s_lf = sin(lf_turn_angle);
-            float c_lb = cos(lb_turn_angle);
-            float s_lb = sin(lb_turn_angle);
-            float c_rf = cos(rf_turn_angle);
-            float s_rf = sin(rf_turn_angle);
-            float c_rb = cos(rb_turn_angle);
-            float s_rb = sin(rb_turn_angle);
-            float vel_lf_mult_c = vel_lf * c_lf;
-            float vel_lf_mult_s = vel_lf * s_lf;
-            float vel_lb_mult_c = vel_lb * c_lb;
-            float vel_lb_mult_s = vel_lb * s_lb;
-            float vel_rf_mult_c = vel_rf * c_rf;
-            float vel_rf_mult_s = vel_rf * s_rf;
-            float vel_rb_mult_c = vel_rb * c_rb;
-            float vel_rb_mult_s = vel_rb * s_rb;
-            float d_squared = wheel_base_ * wheel_base_ + wheel_bias_ * wheel_bias_;
-            twist_.x = (vel_lf_mult_c + vel_lb_mult_c + vel_rf_mult_c + vel_rb_mult_c) * 0.25;
-            twist_.y = (vel_lf_mult_s + vel_lb_mult_s + vel_rf_mult_s + vel_rb_mult_s) * 0.25;
-            twist_.theta = (wheel_base_ * (vel_lf_mult_s - vel_lb_mult_s + vel_rf_mult_s - vel_rb_mult_s) * 0.5 +
-                            wheel_bias_ * (-vel_lf_mult_c - vel_lb_mult_c + vel_rf_mult_c + vel_rb_mult_c) * 0.5) /
-                           d_squared;
-        }
+void RPPDriver::updateTwist(void)
+{
+    double vel_lf, vel_lb, vel_rf, vel_rb;
+    vel_lf = cur_motor_state_.motor_states[LF_MOTOR_ID].omega * wheel_radius_;
+    vel_lb = cur_motor_state_.motor_states[LB_MOTOR_ID].omega * wheel_radius_;
+    vel_rf = cur_motor_state_.motor_states[RF_MOTOR_ID].omega * wheel_radius_;
+    vel_rb = cur_motor_state_.motor_states[RB_MOTOR_ID].omega * wheel_radius_;
+
+    if (motion_model_ == "2wd")
+    {
+        twist_.x = (vel_lf + vel_rf) * 0.5;
+        twist_.theta = (vel_rf - vel_lf) / wheel_bias_;
     }
-    odometry_.ts = twist_.ts = chrono::duration_cast<chrono::nanoseconds>(now.time_since_epoch()).count();
-    last_motor_state_ = cur_motor_state_;
-    if (motion_model_ == "4w4s")
-        last_turn_motor_state_ = cur_turn_motor_state_;
+    else if (motion_model_ == "4wd")
+    {
+        twist_.x = (vel_lf + vel_lb + vel_rf + vel_rb) * 0.25;
+        twist_.theta = ((vel_rf + vel_rb) - (vel_lf + vel_lb)) * 0.5 / wheel_bias_;
+    }
+    else if (motion_model_ == "ackermann")
+    {
+        twist_.x = (vel_lb + vel_rb) * 0.5;
+        twist_.theta = (vel_rb - vel_lb) / wheel_bias_;
+    }
+    else if (motion_model_ == "mecanum")
+    {
+        twist_.x = (vel_lf + vel_lb + vel_rf + vel_rb) * 0.25;
+        twist_.y = (-vel_lf + vel_lb + vel_rf - vel_rb) * 0.25;
+        twist_.theta = (-vel_lf + vel_lb + vel_rf - vel_rb) * 0.5 / (wheel_base_ + wheel_bias_);
+    }
+    else if (motion_model_ == "4w4s")
+    {
+        float lf_turn_angle = cur_turn_motor_state_.motor_states[LF_MOTOR_ID].theta;
+        float lb_turn_angle = cur_turn_motor_state_.motor_states[LB_MOTOR_ID].theta;
+        float rf_turn_angle = cur_turn_motor_state_.motor_states[RF_MOTOR_ID].theta;
+        float rb_turn_angle = cur_turn_motor_state_.motor_states[RB_MOTOR_ID].theta;
+        float c_lf = cos(lf_turn_angle);
+        float s_lf = sin(lf_turn_angle);
+        float c_lb = cos(lb_turn_angle);
+        float s_lb = sin(lb_turn_angle);
+        float c_rf = cos(rf_turn_angle);
+        float s_rf = sin(rf_turn_angle);
+        float c_rb = cos(rb_turn_angle);
+        float s_rb = sin(rb_turn_angle);
+        float vel_lf_mult_c = vel_lf * c_lf;
+        float vel_lf_mult_s = vel_lf * s_lf;
+        float vel_lb_mult_c = vel_lb * c_lb;
+        float vel_lb_mult_s = vel_lb * s_lb;
+        float vel_rf_mult_c = vel_rf * c_rf;
+        float vel_rf_mult_s = vel_rf * s_rf;
+        float vel_rb_mult_c = vel_rb * c_rb;
+        float vel_rb_mult_s = vel_rb * s_rb;
+        float d_squared = wheel_base_ * wheel_base_ + wheel_bias_ * wheel_bias_;
+        twist_.x = (vel_lf_mult_c + vel_lb_mult_c + vel_rf_mult_c + vel_rb_mult_c) * 0.25;
+        twist_.y = (vel_lf_mult_s + vel_lb_mult_s + vel_rf_mult_s + vel_rb_mult_s) * 0.25;
+        twist_.theta = (wheel_base_ * (vel_lf_mult_s - vel_lb_mult_s + vel_rf_mult_s - vel_rb_mult_s) * 0.5 +
+                        wheel_bias_ * (-vel_lf_mult_c - vel_lb_mult_c + vel_rf_mult_c + vel_rb_mult_c) * 0.5) /
+                       d_squared;
+    }
+
+    twist_.ts = chrono::duration_cast<chrono::nanoseconds>(chrono::system_clock::now().time_since_epoch()).count();
 }
 
 DeviceState RPPDriver::getDeviceState()
