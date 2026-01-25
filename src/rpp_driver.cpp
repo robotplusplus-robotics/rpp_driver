@@ -7,8 +7,8 @@ using namespace std;
 namespace rpp
 {
 
-RPPDriver::RPPDriver(string port, int32_t baud_rate, int32_t control_rate, string motion_model,
-                     double wheel_radius, double wheel_bias, double wheel_base, bool use_diff_twist)
+RPPDriver::RPPDriver(string port, int32_t baud_rate, int32_t control_rate, string motion_model, double wheel_radius,
+                     double wheel_bias, double wheel_base, bool use_diff_twist)
     : port_(port), baud_rate_(baud_rate), control_rate_(control_rate), motion_model_(motion_model),
       wheel_radius_(wheel_radius), wheel_bias_(wheel_bias), wheel_base_(wheel_base), use_diff_twist_(use_diff_twist),
       loop_running_(false), serial_port_(nullptr)
@@ -18,34 +18,39 @@ RPPDriver::RPPDriver(string port, int32_t baud_rate, int32_t control_rate, strin
 
 RPPDriver::~RPPDriver()
 {
-    loop_running_ = false;
-    recv_thread_.join();
-    send_thread_.join();
-    if (serial_port_)
+    if (loop_running_ || serial_port_)
     {
-        try
-        {
-            serial_port_->close();
-        }
-        catch (...)
-        {
-        }
-        delete serial_port_;
-        serial_port_ = nullptr;
+        stop();
     }
 }
 
 void RPPDriver::start()
 {
+    if (loop_running_)
+    {
+        fprintf(stderr, "RPPDriver already running, ignore start()\n");
+        return;
+    }
+    if (recv_thread_.joinable() || send_thread_.joinable())
+    {
+        stop();
+    }
+
     try
     {
-        serial_port_ = new boost::asio::serial_port(io_context_, port_);
-        serial_port_->set_option(boost::asio::serial_port::baud_rate(baud_rate_));
-        serial_port_->set_option(boost::asio::serial_port::flow_control(boost::asio::serial_port::flow_control::none));
-        serial_port_->set_option(boost::asio::serial_port::parity(boost::asio::serial_port::parity::none));
-        serial_port_->set_option(boost::asio::serial_port::stop_bits(boost::asio::serial_port::stop_bits::one));
-        serial_port_->set_option(boost::asio::serial_port::character_size(8));
-
+        recv_flag_ = 0;
+        recv_offset_ = 6;
+        odom_initialized_ = false;
+        if (serial_port_ == nullptr)
+        {
+            serial_port_ = new boost::asio::serial_port(io_context_, port_);
+            serial_port_->set_option(boost::asio::serial_port::baud_rate(baud_rate_));
+            serial_port_->set_option(
+                boost::asio::serial_port::flow_control(boost::asio::serial_port::flow_control::none));
+            serial_port_->set_option(boost::asio::serial_port::parity(boost::asio::serial_port::parity::none));
+            serial_port_->set_option(boost::asio::serial_port::stop_bits(boost::asio::serial_port::stop_bits::one));
+            serial_port_->set_option(boost::asio::serial_port::character_size(8));
+        }
         loop_running_ = true;
         recv_thread_ = thread(&RPPDriver::recv_spin, this);
         send_thread_ = thread(&RPPDriver::send_spin, this);
@@ -58,8 +63,42 @@ void RPPDriver::start()
 
 void RPPDriver::stop()
 {
-    loop_running_ = false;
+    const bool was_running = loop_running_.exchange(false);
+    if (!was_running)
+    {
+        return;
+    }
     send_cv_.notify_one();
+    if (serial_port_)
+    {
+        try
+        {
+            serial_port_->cancel();
+            serial_port_->close();
+        }
+        catch (...)
+        {
+        }
+    }
+    if (recv_thread_.joinable())
+        recv_thread_.join();
+    if (send_thread_.joinable())
+        send_thread_.join();
+    if (serial_port_)
+    {
+        delete serial_port_;
+        serial_port_ = nullptr;
+    }
+    {
+        lock_guard<mutex> lock(send_queue_mutex_);
+        while (!send_queue_.empty())
+        {
+            send_queue_.pop();
+        }
+    }
+    recv_flag_ = 0;
+    recv_offset_ = 6;
+    odom_initialized_ = false;
 }
 
 bool RPPDriver::stoped()
@@ -71,8 +110,17 @@ void RPPDriver::send_spin()
 {
     while (true)
     {
+        if (!loop_running_)
+        {
+            break;
+        }
+        if (serial_port_ == nullptr)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
         unique_lock<mutex> lock(send_mutex);
-        send_cv_.wait_for(lock, chrono::milliseconds(1000 / control_rate_),
+        send_cv_.wait_for(lock, chrono::milliseconds(1000 / (control_rate_ <= 0 ? 10 : control_rate_)),
                           [this] { return !send_queue_.empty() || !loop_running_; });
         {
             lock_guard<mutex> lock(send_queue_mutex_);
@@ -83,84 +131,87 @@ void RPPDriver::send_spin()
             }
             while (!send_queue_.empty())
             {
+                if (!loop_running_)
+                {
+                    break;
+                }
                 vector<uint8_t> msg;
                 msg = send_queue_.front();
                 send_queue_.pop();
-                try
+                boost::system::error_code ec;
+                std::size_t bytes_written =
+                    boost::asio::write(*serial_port_, boost::asio::buffer(msg.data(), msg.size()), ec);
+                if (ec)
                 {
-                    size_t bytes_written =
-                        boost::asio::write(*serial_port_, boost::asio::buffer(msg.data(), msg.size()));
-                    if (bytes_written != msg.size())
+                    if (!loop_running_ || ec == boost::asio::error::operation_aborted ||
+                        ec == boost::asio::error::bad_descriptor)
                     {
-                        fprintf(stderr, "Partial write: %zu/%zu\n", bytes_written, msg.size());
+                        break;
                     }
+                    fprintf(stderr, "Write failed: %s\n", ec.message().c_str());
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    break;
                 }
-                catch (const std::exception &e)
+                if (bytes_written != msg.size())
                 {
-                    fprintf(stderr, "Write failed: %s\n", e.what());
+                    fprintf(stderr, "Partial write: %zu/%zu\n", bytes_written, msg.size());
                 }
             }
         }
-        if (!loop_running_)
-            break;
     }
 }
 void RPPDriver::recv_spin()
 {
-    while (loop_running_)
+    while (true)
     {
-        try
+        if (!loop_running_)
         {
-            uint8_t buffer[1];
-            size_t len =
-                boost::asio::read(*serial_port_, boost::asio::buffer(buffer), boost::asio::transfer_at_least(1));
-            if (len > 0)
-            {
-                for (size_t i = 0; i < len; ++i)
-                {
-                    // printf("%02x ", buffer[i]);
-                    ring_buffer_.writeSerialRingBuffer(buffer[i]);
-                }
-                dataStream();
-            }
+            break;
         }
-        catch (const boost::system::system_error &e)
+        if (serial_port_ == nullptr)
         {
-            // 处理超时或错误
-            if (e.code() != boost::asio::error::operation_aborted)
-            {
-                fprintf(stderr, "Serial read error: %s\n", e.what());
-                // 等待后重试
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
         }
-        catch (...)
+        uint8_t buffer[256];
+        boost::system::error_code ec;
+        size_t len = serial_port_->read_some(boost::asio::buffer(buffer, sizeof(buffer)), ec);
+        if (ec)
         {
-            // 其他异常
+            if (!loop_running_ || ec == boost::asio::error::operation_aborted ||
+                ec == boost::asio::error::bad_descriptor)
+            {
+                break;
+            }
+            fprintf(stderr, "Serial read error: %s\n", ec.message().c_str());
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            continue;
         }
+        for (size_t i = 0; i < len; ++i)
+        {
+            ring_buffer_.writeSerialRingBuffer(buffer[i]);
+        }
+        dataStream();
     }
 }
 
 void RPPDriver::dataStream()
 {
-    static int recv_flag = 0;
-    static int offset = 6;
     uint8_t data = 0;
 
-    if (ring_buffer_.readSerialRingBuffer(&data))
+    while (ring_buffer_.readSerialRingBuffer(&data))
     {
-        switch (recv_flag)
+        switch (recv_flag_)
         {
         case 0: {
             if (data == 0xFF)
             {
                 handler_buf[0] = data;
-                recv_flag = 1;
+                recv_flag_ = 1;
             }
             else
             {
-                recv_flag = 0;
+                recv_flag_ = 0;
             }
             break;
         }
@@ -168,68 +219,69 @@ void RPPDriver::dataStream()
             if (data == 0xAA)
             {
                 handler_buf[1] = data;
-                recv_flag = 2;
+                recv_flag_ = 2;
             }
             else
             {
-                recv_flag = 0;
+                recv_flag_ = 0;
             }
             break;
         }
         case 2: {
             handler_buf[2] = data; // 从机地址
-            recv_flag = 3;
+            recv_flag_ = 3;
             break;
         }
         case 3: {
             handler_buf[3] = data; // 功能码
-            recv_flag = 4;
+            recv_flag_ = 4;
             break;
         }
         case 4: {
             handler_buf[4] = data; // 数据段字节数L
-            recv_flag = 5;
+            recv_flag_ = 5;
             break;
         }
         case 5: {
             handler_buf[5] = data; // 数据段字节数H
-            recv_flag = 6;
+            uint16_t data_len = (uint16_t)(handler_buf[5] << 8 | handler_buf[4]);
+            if (data_len < 1 || data_len > DATA_LEN_MAX - 8)
+            {
+                fprintf(stderr, "error data_len: %d, offset: %d\n", data_len, recv_offset_);
+                recv_flag_ = 0;
+                recv_offset_ = 6;
+                break;
+            }
+            recv_flag_ = 6;
             break;
         }
         case 6: {
-            handler_buf[offset] = data;
             uint16_t data_len = (uint16_t)(handler_buf[5] << 8 | handler_buf[4]);
-            if (data_len < 1 || data_len > DATA_LEN_MAX || offset > sizeof(handler_buf))
+            handler_buf[recv_offset_] = data;
+            if (recv_offset_ >= (6 + data_len - 1))
             {
-                fprintf(stderr, "error data_len: %d, offset: %d\n", data_len, offset);
-                recv_flag = 0;
-                offset = 6;
-                break;
+                recv_flag_ = 7;
             }
-            else if (offset >= (6 + data_len - 1))
-            {
-                recv_flag = 7;
-            }
-            offset++;
+            recv_offset_++;
             break;
         }
         case 7: {
-            handler_buf[offset] = data; // 校验值L
-            offset++;
-            recv_flag = 8;
+            handler_buf[recv_offset_] = data; // 校验值L
+            recv_offset_++;
+            recv_flag_ = 8;
             break;
         }
         case 8: {
-            handler_buf[offset] = data; // 校验值H
-            uint16_t recv_checksum = (uint16_t)(handler_buf[offset] << 8 | handler_buf[offset - 1]);
-            vector<uint8_t> tmp(handler_buf, handler_buf + (offset - 1));
+            handler_buf[recv_offset_] = data; // 校验值H
+            uint16_t recv_checksum = (uint16_t)(handler_buf[recv_offset_] << 8 | handler_buf[recv_offset_ - 1]);
+            vector<uint8_t> tmp(handler_buf, handler_buf + (recv_offset_ - 1));
             uint16_t cal_checksum = getChecksum(tmp);
             if (cal_checksum == recv_checksum)
             {
-                paraseData((char *)handler_buf, offset + 1); // 数据处理
+                paraseData((char *)handler_buf, recv_offset_ + 1); // 数据处理
             }
-            recv_flag = 0;
-            offset = 6;
+            recv_flag_ = 0;
+            recv_offset_ = 6;
             break;
         }
         default: {
@@ -318,7 +370,7 @@ void RPPDriver::handleMotorOmegaStatus(const char *data, const int len)
             memcpy(&cur_turn_motor_state_.motor_states[i].omega, (const void *)&data[4 * i + 6 + 16], sizeof(float));
         }
     }
-    if(use_diff_twist_)
+    if (use_diff_twist_)
         return;
     updateTwist();
 }
@@ -371,7 +423,7 @@ void RPPDriver::handleDevStatusData(const char *data, const int len)
     memcpy(&control_mode, (const void *)&data[6], sizeof(control_mode));
     memcpy(&power_mode, (const void *)&data[7], sizeof(power_mode));
     memcpy(&motor_mode, (const void *)&data[8], sizeof(motor_mode));
-    memcpy(&e_stop, (const void *)&data[8], sizeof(e_stop));
+    memcpy(&e_stop, (const void *)&data[9], sizeof(e_stop));
     lock_guard<mutex> lock(dev_state_mutex_);
     cur_dev_state_.control_mode = control_mode;
     cur_dev_state_.power_mode = power_mode;
@@ -400,38 +452,35 @@ void RPPDriver::handleThrottleSteeringStatusData(const char *data, const int len
     float throttle = 0;
     float brake_strength = 0;
     float speed = 0;
-    float steering_angular = 0;
     float steering_angle_velocity = 0;
+    float steering_angular = 0;
     memcpy(&gear_position, (const void *)&data[6], sizeof(gear_position));
     memcpy(&throttle, (const void *)&data[7], sizeof(throttle));
     memcpy(&brake_strength, (const void *)&data[11], sizeof(brake_strength));
     memcpy(&speed, (const void *)&data[15], sizeof(speed));
-    memcpy(&steering_angular, (const void *)&data[19], sizeof(steering_angular));
-    memcpy(&steering_angle_velocity, (const void *)&data[23], sizeof(int));
+    memcpy(&steering_angle_velocity, (const void *)&data[19], sizeof(steering_angle_velocity));
+    memcpy(&steering_angular, (const void *)&data[23], sizeof(steering_angular));
 }
 
 void RPPDriver::updateOdometry(void)
 {
-    static bool init = false;
-    static chrono::time_point<chrono::system_clock> last_time;
-
-    if (!init)
+    if (!odom_initialized_)
     {
         last_motor_state_ = cur_motor_state_;
         if (motion_model_ == "4w4s")
             last_turn_motor_state_ = cur_turn_motor_state_;
-        init = true;
+        odom_initialized_ = true;
 
-        last_time = chrono::system_clock::now();
+        odom_last_time_ = chrono::system_clock::now();
     }
     auto now = chrono::system_clock::now();
-    auto dt = chrono::duration<double>(now - last_time).count();
+    auto dt = chrono::duration<double>(now - odom_last_time_).count();
 
     if (dt < 0.00001)
     {
         return;
     }
-    last_time = chrono::system_clock::now();
+    odom_last_time_ = chrono::system_clock::now();
 
     float lf_diff_theta =
         cur_motor_state_.motor_states[LF_MOTOR_ID].theta - last_motor_state_.motor_states[LF_MOTOR_ID].theta;
@@ -458,6 +507,10 @@ void RPPDriver::updateOdometry(void)
     }
     else if (motion_model_ == "4wd")
     {
+        dist_lf = wheel_radius_ * lf_diff_theta;
+        dist_lb = wheel_radius_ * lb_diff_theta;
+        dist_rf = wheel_radius_ * rf_diff_theta;
+        dist_rb = wheel_radius_ * rb_diff_theta;
         dx = ((dist_lf + dist_lb) + (dist_rf + dist_rb)) * 0.25;
         domega = ((dist_rf + dist_rb) - (dist_lf + dist_lb)) * 0.5 / wheel_bias_;
     }
@@ -476,7 +529,7 @@ void RPPDriver::updateOdometry(void)
         dist_rb = wheel_radius_ * rb_diff_theta;
         dx = (dist_lf + dist_lb + dist_rf + dist_rb) * 0.25;
         dy = (-dist_lf + dist_lb + dist_rf - dist_rb) * 0.25;
-        domega = (-dist_lf - dist_lb + dist_rf + dist_rb) * 0.5 / (wheel_base_ + wheel_bias_);
+        domega = (-dist_lf - dist_lb + dist_rf + dist_rb) * 0.25 / (wheel_base_ + wheel_bias_);
     }
     else if (motion_model_ == "4w4s")
     {
@@ -562,7 +615,7 @@ void RPPDriver::updateTwist(void)
     {
         twist_.x = (vel_lf + vel_lb + vel_rf + vel_rb) * 0.25;
         twist_.y = (-vel_lf + vel_lb + vel_rf - vel_rb) * 0.25;
-        twist_.theta = (-vel_lf + vel_lb + vel_rf - vel_rb) * 0.5 / (wheel_base_ + wheel_bias_);
+        twist_.theta = (-vel_lf - vel_lb + vel_rf + vel_rb) * 0.25 / (wheel_base_ + wheel_bias_);
     }
     else if (motion_model_ == "4w4s")
     {
@@ -647,13 +700,17 @@ Twist RPPDriver::getTwist()
 
 bool RPPDriver::sendCommand(const vector<uint8_t> command)
 {
+    if (!loop_running_)
+    {
+        return false;
+    }
     lock_guard<mutex> lock(send_queue_mutex_);
     send_queue_.push(command);
     send_cv_.notify_one();
     return true;
 }
 
-void RPPDriver::sendControlCommand(const uint8_t control_mode, const uint8_t power_mode, const float motor_mode)
+void RPPDriver::sendControlCommand(const uint8_t control_mode, const uint8_t power_mode, const uint8_t motor_mode)
 {
     auto cmd = command::controlModeCmd(control_mode, power_mode, motor_mode);
     sendCommand(cmd);

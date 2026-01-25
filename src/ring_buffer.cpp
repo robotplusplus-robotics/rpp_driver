@@ -15,7 +15,7 @@ void RingBuffer::initSerialRingBuffer(uint32_t size)
         delete[] recv_buf;
     }
     recv_buf = new uint8_t[size];
-    memset(recv_buf, 0, sizeof(recv_buf));
+    memset(recv_buf, 0, size);
 }
 
 /* 读队列 */

@@ -50,7 +50,7 @@ int main()
     set_nonblocking_terminal();
     atexit(restore_terminal);
 
-    RPPDriver rpp_driver("/dev/ttyUSB0", 230400, 100, "mecanum", 0.156, 0.400, 0.450, true);
+    RPPDriver rpp_driver("/dev/ttyUSB0", 230400, 100, "4w4s", 0.125, 0.375, 0.515, false);
     rpp_driver.start();
     rpp_driver.sendControlCommand(0x01, 0, 0x0f);
 

@@ -4,6 +4,7 @@
 #include <array>
 #include <thread>
 #include <queue>
+#include <atomic>
 #include <condition_variable>
 
 #include "ring_buffer.h"
@@ -84,7 +85,7 @@ class RPPDriver
 
     bool sendCommand(const vector<uint8_t> command);
 
-    void sendControlCommand(const uint8_t control_mode, const uint8_t power_mode, const float motor_mode);
+    void sendControlCommand(const uint8_t control_mode, const uint8_t power_mode, const uint8_t motor_mode);
 
     void sendOmniVelocityCommand(const float linear_x, const float linear_y, const float angular_z);
 
@@ -118,12 +119,14 @@ class RPPDriver
 
     // buffer
     uint8_t handler_buf[DATA_LEN_MAX];
+    int recv_flag_ = 0;
+    int recv_offset_ = 6;
     //
     queue<vector<uint8_t>> send_queue_;
     std::mutex send_queue_mutex_;
 
     // thread
-    bool loop_running_; // not atomic, maybe not safe
+    std::atomic<bool> loop_running_;
     thread recv_thread_;
     thread send_thread_;
     std::mutex send_mutex;
@@ -150,6 +153,8 @@ class RPPDriver
     std::mutex motor_mutex_;
     std::chrono::time_point<std::chrono::system_clock> last_odom_time_;
     std::chrono::time_point<std::chrono::system_clock> cur_odom_time_;
+    bool odom_initialized_ = false;
+    std::chrono::time_point<std::chrono::system_clock> odom_last_time_;
     Odometry odometry_;
     Twist twist_;
 };
